@@ -1,0 +1,13 @@
+{
+  "_comment": "rpcUrl 使用 dRPC 负载均衡端点（含 key，勿泄露到前端）。deployBlock 必须 <= Hub 合约的部署区块号。",
+  "rpcUrl": "https://YOUR_DRPC_ENDPOINT",
+  "hubAddress": "0x0000000000000000000000000000000000000000",
+  "marketAddress": "0x0000000000000000000000000000000000000000",
+  "deployBlock": 0,
+  "confirmations": 10,
+  "batchBlocks": 50,
+  "pollMs": 3000,
+  "port": 3000,
+  "stateFile": "state.json",
+  "eventsFile": "events.jsonl"
+}

@@ -1,0 +1,13 @@
+{
+  "_comment": "主网(chain 4663)生产配置模板。deploy-mainnet.sh 广播后会自动把 hubAddress/marketAddress/deployBlock 填好并生成 config.production.json。rpcUrl 含 dRPC key,勿泄露到前端;可用 systemd EnvironmentFile 的 RPC_URL 覆盖。stateFile/eventsFile 用服务器持久盘绝对路径。",
+  "rpcUrl": "https://YOUR_DRPC_ENDPOINT",
+  "hubAddress": "0x0000000000000000000000000000000000000000",
+  "marketAddress": "0x0000000000000000000000000000000000000000",
+  "deployBlock": 0,
+  "confirmations": 10,
+  "batchBlocks": 200,
+  "pollMs": 3000,
+  "port": 3000,
+  "stateFile": "/opt/rob20/indexer/state.json",
+  "eventsFile": "/opt/rob20/indexer/events.jsonl"
+}

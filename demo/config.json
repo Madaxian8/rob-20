@@ -1,0 +1,12 @@
+{
+  "rpcUrl": "http://127.0.0.1:8545",
+  "hubAddress": "0x7bc06c482dead17c0e297afbc32f6e63d3846650",
+  "marketAddress": "0xc351628eb244ec633d5f21fbd6621e1a683b1181",
+  "deployBlock": 334,
+  "confirmations": 0,
+  "batchBlocks": 500,
+  "pollMs": 2000,
+  "port": 3000,
+  "stateFile": "/Users/howe/Desktop/Robinhood铭文/demo/state.json",
+  "eventsFile": "/Users/howe/Desktop/Robinhood铭文/demo/events.jsonl"
+}

@@ -1,0 +1,29 @@
+# systemd unit — rob-20 market oracle (confirms listings, settles bids). 24/7.
+# The oracle key is a DEDICATED low-value hot wallet (only spends gas to call
+# confirm/settleBid). It is loaded from a root-only EnvironmentFile as a raw
+# key because cast keystores can't unlock headless. Keep /etc/rob20/oracle.env 0600.
+# Install: sudo cp ops/rob20-oracle.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now rob20-oracle
+[Unit]
+Description=rob-20 market oracle
+After=network-online.target rob20-indexer.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rob20
+WorkingDirectory=/opt/rob20
+Environment=CONFIG_PATH=/opt/rob20/indexer/config.production.json
+Environment=API_URL=http://127.0.0.1:3000
+# oracle.env defines ORACLE_PRIVATE_KEY=0x... (and optionally RPC_URL=)
+EnvironmentFile=/etc/rob20/oracle.env
+ExecStart=/usr/bin/node /opt/rob20/indexer/oracle.mjs
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

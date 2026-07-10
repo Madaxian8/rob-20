@@ -1,0 +1,12 @@
+{
+  "rpcUrl": "https://rpc.testnet.chain.robinhood.com",
+  "hubAddress": "0x61E43201fa9b9d4751da3084c8172eA362D97907",
+  "marketAddress": "0x3287546d85fd025416a4b841a610c3a6Cb508AFE",
+  "deployBlock": 88841461,
+  "confirmations": 2,
+  "batchBlocks": 500,
+  "pollMs": 3000,
+  "port": 3000,
+  "stateFile": "testnet-state.json",
+  "eventsFile": "testnet-events.jsonl"
+}
