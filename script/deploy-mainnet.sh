@@ -123,7 +123,7 @@ cat <<EOF
 Next steps:
   1) Upload the config to the server:
        scp -i ~/.ssh/rob20_server_ed25519 indexer/config.production.json \\
-         root@187.127.113.216:/opt/rob20/indexer/config.production.json
+         root@<your-server>:/opt/rob20/indexer/config.production.json
   2) Point monitor.env RPC at mainnet and set ORACLE_ADDR=$OPERATOR:
        ssh ... 'sed -i "s|^RPC=.*|RPC=$RPC|;s|^ORACLE_ADDR=.*|ORACLE_ADDR=$OPERATOR|" /etc/rob20/monitor.env'
   3) Fund the operator hot wallet ($OPERATOR) with gas (≥0.05 ETH recommended).

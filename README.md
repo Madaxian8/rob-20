@@ -16,11 +16,33 @@ Robinhood Chain 上的 calldata 铭文发射与交易平台。任何人都可以
 | [indexer/public/](indexer/public/) | 前端站：tick 列表 / 部署 / mint / 双边市场 / 我的资产。EIP-6963 多钱包（Rainbow/MetaMask/Coinbase…）。 |
 | [e2e/e2e.mjs](e2e/e2e.mjs) | anvil 全链路联测（合约 + 索引器 + 市场生命周期 + 重放确定性）。 |
 
+## 快速开始 / 环境变量
+
+克隆（含子模块 forge-std / openzeppelin）：
+
+```bash
+git clone --recurse-submodules <repo-url> && cd rob-20
+```
+
+**含 key 的 RPC 端点不入库**，运行时用环境变量提供（仓库里的 `foundry.toml`、`indexer/config*.json` 均为占位符）：
+
+| 变量 | 用途 |
+|---|---|
+| `RPC_URL` | indexer / oracle 连链用的 RPC（覆盖 config 里的 rpcUrl） |
+| `ROBINHOOD_RPC` | foundry 的 `robinhood` 端点（部署 / 脚本） |
+
+真实端点走上面的环境变量，或写进服务器上 gitignored 的 `config.production.json` / systemd `EnvironmentFile`。本地起索引器 + 前端：
+
+```bash
+RPC_URL=<你的RPC> CONFIG_PATH=indexer/config.json node indexer/indexer.mjs
+# 打开 http://localhost:3000
+```
+
 ## 测试
 
 ```bash
-forge test        # 31 个合约测试（解析器边界 + 模糊测试）
-node e2e/e2e.mjs  # 全链路端到端
+forge test        # 56 个合约测试 + 不变量测试（解析器边界 + 模糊测试）
+node e2e/e2e.mjs  # 全链路端到端（含 100% mint 才可交易的门槛）
 ```
 
 ## 上线步骤（Robinhood Chain 主网，链 ID 4663）
