@@ -89,6 +89,164 @@ main.container { flex: 1; padding-top: 28px; padding-bottom: 56px; }
 .nav a:hover { color: var(--text); text-decoration: none; background: var(--card); }
 .nav a.active { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
 
+/* Memes launchpad nav entry — set apart from the inscription tabs */
+.nav a.nav-memes {
+  margin-right: 10px; color: var(--accent);
+  border: 1px solid rgba(195, 255, 9, 0.30);
+}
+.nav a.nav-memes::before { content: "✦"; margin-right: 5px; opacity: .8; font-size: 11px; }
+.nav a.nav-memes:hover { background: var(--accent-soft); }
+.nav a.nav-memes.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+/* Memes page */
+.memes-page { max-width: 720px; }
+.memes-hero { text-align: center; padding: 22px 0 8px; }
+.memes-badge {
+  display: inline-block; padding: 3px 12px; border-radius: 999px; font-size: 12px; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--accent-ink); background: var(--accent);
+}
+.memes-tagline { color: var(--muted); font-size: 15px; max-width: 32em; margin: 8px auto 18px; line-height: 1.55; }
+.memes-h2 { font-size: 16px; margin: 0 0 12px; }
+.memes-list { margin: 0; padding-left: 18px; color: var(--text); }
+.memes-list li { margin: 8px 0; line-height: 1.5; }
+.memes-status { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--muted); }
+.memes-status.pending { border-color: rgba(245, 183, 78, 0.3); }
+.memes-status.ok { border-color: rgba(195, 255, 9, 0.3); }
+.pill-soon { background: rgba(245, 183, 78, 0.15); color: var(--amber); }
+.memes-coin {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 12px 14px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); margin-bottom: 8px;
+}
+.memes-coin:hover { border-color: var(--accent); text-decoration: none; }
+.memes-coin-by { color: var(--muted); font-size: 13px; }
+.memes-coin-name { font-weight: 600; }
+.meme-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 6px; }
+
+/* Recent launches — rectangular coin cards */
+.memes-list-head { margin: 22px 0 12px; }
+.memes-grid { display: flex; flex-direction: column; gap: 10px; }
+.meme-card {
+  display: flex; align-items: center; gap: 14px; cursor: pointer;
+  background: var(--card); border: 1px solid var(--border-soft); border-radius: var(--radius);
+  padding: 14px 16px; transition: border-color .15s, background .15s;
+}
+.meme-card:hover { border-color: var(--accent); background: #151a20; }
+.meme-avatar {
+  flex: none; width: 44px; height: 44px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 20px; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.35);
+}
+img.meme-avatar { object-fit: cover; }
+.meme-card-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+
+/* coming-soon (launchpad not deployed) */
+.memes-coming { text-align: center; padding: 64px 24px 40px; }
+.memes-coming-badge {
+  display: inline-block; padding: 6px 16px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(195, 255, 9, 0.3);
+  font-size: 13px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+}
+.memes-coming-title { font-family: var(--serif); font-size: 44px; font-weight: 700; margin: 18px 0 6px; }
+.memes-coming p { max-width: 32em; margin: 0 auto; color: var(--muted); font-size: 15px; line-height: 1.6; }
+
+/* search box */
+.memes-search {
+  width: 100%; margin: 4px 0 6px; padding: 12px 16px;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text); font-size: 15px; transition: border-color .15s;
+}
+.memes-search::placeholder { color: var(--muted); }
+.memes-search:focus { outline: none; border-color: var(--accent); }
+
+/* sort bar + pagination */
+.memes-listbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 22px 0 12px; }
+.memes-listbar .memes-h2 { margin: 0; }
+.memes-sort { display: flex; gap: 4px; flex-wrap: wrap; }
+.memes-sort button {
+  background: var(--card); border: 1px solid var(--border-soft); color: var(--muted);
+  border-radius: 999px; padding: 5px 12px; font-size: 13px; font-weight: 600; cursor: pointer; transition: color .15s, background .15s;
+}
+.memes-sort button:hover { color: var(--text); }
+.memes-sort button.active { background: var(--accent-soft); border-color: rgba(195, 255, 9, 0.3); color: var(--accent); }
+.memes-pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 16px; }
+.memes-pager button {
+  background: var(--card); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius-sm); padding: 6px 14px; font-size: 14px; cursor: pointer;
+}
+.memes-pager button:disabled { opacity: .4; cursor: default; }
+.memes-pageinfo { color: var(--muted); font-size: 13px; }
+
+/* per-card metrics (right side; wraps below on narrow cards) */
+.meme-metrics { display: flex; gap: 18px; flex: none; margin-left: auto; }
+.meme-metric { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.mm-k { font-size: 10px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.mm-v { font-size: 14px; font-weight: 700; font-family: var(--mono); }
+.meme-card-title { font-weight: 700; font-size: 16px; }
+.meme-ticker { color: var(--muted); font-weight: 600; font-size: 13px; }
+.meme-ca {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 12px; color: var(--muted);
+  background: transparent; border: 0; padding: 2px 0; cursor: pointer;
+}
+.meme-ca:hover { color: var(--accent); }
+.meme-ca-ic { font-size: 12px; opacity: .8; }
+
+/* Create form — avatar square dropzone */
+.meme-drop {
+  position: relative; display: block; width: 120px; height: 120px; cursor: pointer;
+  border: 1px dashed var(--border); border-radius: 16px; overflow: hidden;
+  background: var(--card); transition: border-color .15s;
+}
+.meme-drop:hover { border-color: var(--accent); }
+.meme-drop-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.meme-drop-hint {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 4px;
+  color: var(--muted); font-size: 13px; font-weight: 600;
+}
+.meme-drop-plus { font-size: 28px; font-weight: 300; line-height: 1; }
+
+/* Create form top row: avatar (left) + Name/Ticker (right) */
+.meme-form-top { display: flex; gap: 16px; align-items: stretch; }
+.meme-form-top .meme-drop { flex: none; width: 132px; height: auto; align-self: stretch; }
+.meme-form-top-right { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.meme-form-top-right .field { flex: 1; display: flex; flex-direction: column; }
+.meme-form-top-right .field input { flex: 1; }
+
+/* Coin detail — social links */
+.meme-socials { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.meme-social {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
+  border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+  font-size: 13px; color: var(--text);
+}
+.meme-social:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+
+/* Coin detail page */
+.coin-page { max-width: 640px; }
+.coin-hero { display: flex; align-items: center; gap: 16px; margin: 10px 0 20px; }
+.coin-hero .meme-avatar { width: 72px; height: 72px; border-radius: 20px; font-size: 32px; flex: none; }
+.coin-hero-info { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.coin-hero-title { font-family: var(--serif); font-size: 30px; font-weight: 700; line-height: 1.1; }
+.coin-hero-title .ticker { font-family: var(--mono); font-size: 16px; color: var(--muted); font-weight: 600; }
+.coin-ca { align-self: flex-start; }
+.coin-hero-info .meme-socials { margin-top: 0; }
+
+.coin-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+.coin-stat { background: var(--card); border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 14px 10px; text-align: center; }
+.cs-k { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 6px; }
+.cs-v { font-size: 18px; font-weight: 700; font-family: var(--mono); }
+@media (max-width: 520px) { .coin-stats { grid-template-columns: repeat(2, 1fr); } }
+
+.narrow-page.coin-page .card { margin-bottom: 18px; }
+.coin-info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px; }
+.coin-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.coin-info.wide { grid-column: 1 / -1; }
+.ci-k { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.ci-v { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.coin-info .addr-link { font-family: var(--mono); font-weight: 600; }
+@media (max-width: 480px) { .coin-info-grid { grid-template-columns: 1fr; gap: 14px; } }
+
 .topbar-right { display: flex; align-items: center; gap: 12px; margin-left: auto; position: relative; }
 .block-pill {
   display: inline-flex; align-items: center; gap: 6px;

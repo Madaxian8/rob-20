@@ -2,11 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "rob20-indexer",
-      "runtimeExecutable": "node",
-      "runtimeArgs": ["/Users/howe/Desktop/Robinhood铭文/indexer/indexer.mjs"],
-      "env": { "CONFIG_PATH": "/Users/howe/Desktop/Robinhood铭文/demo/config.json" },
-      "port": 3000
+      "name": "rob20-static",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "4173", "--directory", "indexer/public"],
+      "port": 4173
     }
   ]
 }

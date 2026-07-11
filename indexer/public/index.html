@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <title>Rob-20</title>
 <link rel="icon" href="logo.png" type="image/png">
-<link rel="stylesheet" href="style.css?v=10">
+<link rel="stylesheet" href="style.css?v=24">
 </head>
 <body>
 <header class="topbar">
@@ -14,10 +14,10 @@
     <a class="logo" href="#/" aria-label="rob-20 Home">
       <img class="logo-feather" src="logo.png" alt="rob-20" width="34" height="34">
       <span class="logo-word">rob<span class="logo-accent">·20</span></span>
-      <span class="logo-sub">Inscriptions</span>
     </a>
     <nav class="nav" id="nav">
-      <a href="#/" data-route="home">Home</a>
+      <a class="nav-memes" href="#/memes" data-route="memes">Memes</a>
+      <a href="#/" data-route="home">Inscriptions</a>
       <a href="#/market" data-route="market">Market</a>
       <a href="#/deploy" data-route="deploy">Deploy</a>
       <a href="#/me" data-route="me">My</a>
@@ -28,9 +28,7 @@
   </div>
 </header>
 
-<main id="app" class="container">
-  <div class="card empty">Loading…</div>
-</main>
+<main id="app" class="container"></main>
 
 <footer class="footer">
   <div class="container footer-inner">
@@ -40,12 +38,10 @@
     </a>
     <span class="footer-sep">·</span>
     <a href="https://robinhoodchain.blockscout.com" target="_blank" rel="noopener">Block Explorer</a>
-    <span class="footer-sep">·</span>
-    <a href="https://robinhoodchain.blockscout.com/token/0x6b994d52551ba923b0414afd56b393f840497778" target="_blank" rel="noopener" title="0x6b994d52551ba923b0414afd56b393f840497778">$ROB Token: 0x6b99…7778</a>
   </div>
 </footer>
 
 <div id="toasts"></div>
-<script src="app.js?v=13"></script>
+<script src="app.js?v=33"></script>
 </body>
 </html>

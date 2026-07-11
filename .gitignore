@@ -45,5 +45,11 @@ indexer/backups/
 # Testnet + demo runtime artifacts (regenerated; not source)
 indexer/testnet-state.json
 indexer/testnet-events.jsonl
+indexer/state.testnet.json
+indexer/events.testnet.jsonl
+indexer/config.testnet.json
 demo/state.json
 demo/events.jsonl
+
+# Launchpad (foundry) deploy logs — regenerable; addresses live in launchpad/README.md
+launchpad/broadcast/

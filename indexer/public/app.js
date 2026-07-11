@@ -22,12 +22,22 @@ const SEL_CANCEL = "0x40e58ee5"; // cancel(uint256)
 const SEL_SWEEP = "0x98b02275";  // sweep(uint256[])
 const SEL_PLACEBID = "0xc7df5882"; // placeBid(string,uint128,uint128)
 const SEL_CANCELBID = "0x9703ef35"; // cancelBid(uint256)
+// Memes launchpad
+const SEL_LAUNCH = "0x98110acd";           // launch(string,string,string,uint256)
+const SEL_WITHDRAW_CREATOR = "0x38a6fc32"; // withdrawCreator(address)
+const SEL_WITHDRAW_TREASURY = "0xf86c9e9a"; // withdrawTreasury(address)
+const SEL_PENDING_CREATOR = "0x72d1ae54";  // pendingCreator()
+const SEL_PENDING_TREASURY = "0x2ed6b75d"; // pendingTreasury()
+const SEL_CREATOR = "0x02d05d3f";          // creator()
+const SEL_TREASURY = "0x61d027b3";         // treasury()
+const MEME_SUPPLY = 1000000000n * (10n ** 18n); // 1e27, used as launch maxTokenAmount bound
 const FEE_BPS = 500n;            // 买卖双边各 5%
 const MAX_SWEEP = 50;            // 合约单笔扫单上限
 
 // ---------------- 全局状态 ----------------
 let HUB = null;
 let MARKET = null;
+let LAUNCHPAD = null; // Memes 发射台工厂地址（部署后由 /api/status 下发）
 let account = null;          // 已连接地址（小写）
 let currentUpdate = null;    // 当前页面的数据刷新函数
 let navToken = 0;            // 每次路由切换自增；异步 update() 用它判断是否已过期
@@ -418,6 +428,75 @@ function deployTx(tick, maxMints, amountPerMint, walletLimit, mintPriceWei) {
     abiWord(tick.length) + tickHex.padEnd(64, "0");
   return { to: HUB, value: "0x0", data };
 }
+
+// ---- Memes launchpad tx builders + chain reads ----
+// ABI-encode a dynamic string tail segment: length word + right-padded bytes.
+function abiStr(s) {
+  const bytes = new TextEncoder().encode(s);
+  let hex = "";
+  for (const b of bytes) hex += b.toString(16).padStart(2, "0");
+  const padded = hex.padEnd(Math.ceil(hex.length / 64) * 64, "0");
+  return { hex: abiWord(bytes.length) + padded, byteLen: 32 + Math.ceil(bytes.length / 32) * 32 };
+}
+function launchTx(name, symbol, imageURI, valueWei) {
+  // launch(string name, string symbol, string imageURI, uint256 maxTokenAmount)
+  const n = abiStr(name), s = abiStr(symbol), im = abiStr(imageURI);
+  const off1 = 128; // 4 head words
+  const off2 = 128 + n.byteLen;
+  const off3 = 128 + n.byteLen + s.byteLen;
+  const data = SEL_LAUNCH + abiWord(off1) + abiWord(off2) + abiWord(off3) + abiWord(MEME_SUPPLY) + n.hex + s.hex + im.hex;
+  return { to: LAUNCHPAD, value: "0x" + BigInt(valueWei).toString(16), data };
+}
+
+// Upload an image to the indexer, which pins it to IPFS; returns { cid, ipfs, url }.
+async function pinAvatar(file) {
+  const dataB64 = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] || "");
+    r.onerror = () => reject(new Error("could not read file"));
+    r.readAsDataURL(file);
+  });
+  const resp = await fetch("/api/memes/pin", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ dataB64 }),
+  });
+  const j = await resp.json().catch(() => ({}));
+  if (!resp.ok || !j.ipfs) throw new Error(j.error || "image pinning failed");
+  return j;
+}
+
+// Pin a metadata JSON object to IPFS; returns { cid, ipfs, url }.
+async function pinJson(obj) {
+  const resp = await fetch("/api/memes/pin-json", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ json: obj }),
+  });
+  const j = await resp.json().catch(() => ({}));
+  if (!resp.ok || !j.ipfs) throw new Error(j.error || "metadata pinning failed");
+  return j;
+}
+function withdrawCreatorTx(token, to) {
+  return { to: token, value: "0x0", data: SEL_WITHDRAW_CREATOR + abiWord(to) };
+}
+function withdrawTreasuryTx(token, to) {
+  return { to: token, value: "0x0", data: SEL_WITHDRAW_TREASURY + abiWord(to) };
+}
+// eth_call via the connected wallet (current chain) if available, else the public RPC.
+async function readCall(to, data) {
+  const params = [{ to, data }, "latest"];
+  if (wallet && account) {
+    try { return await wallet.request({ method: "eth_call", params }); } catch (_) {}
+  }
+  const res = await fetch(CHAIN_PARAMS.rpcUrls[0], {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params }),
+  });
+  const body = await res.json();
+  if (body.error) throw new Error(body.error.message);
+  return body.result;
+}
+const readBig = (hex) => (hex && hex !== "0x" ? BigInt(hex) : 0n);
+
 function buyTx(id, priceWei) {
   const price = BigInt(priceWei);
   const pay = price + (price * FEE_BPS) / 10000n; // 买家实付 = price * 1.05（向下取整）
@@ -474,6 +553,7 @@ async function refreshStatus() {
     const s = await api("/api/status");
     HUB = s.hub;
     MARKET = s.market;
+    LAUNCHPAD = s.launchpad || null;
     return s;
   } catch (_) {
     return null;
@@ -1505,6 +1585,461 @@ async function pageMe() {
 }
 
 // ---------------- 路由 ----------------
+let memesState = { coins: [], sort: "new", search: "", page: 0, ethUsd: null, pageSize: 8 };
+
+async function pageMemes() {
+  const live = !!LAUNCHPAD;
+
+  if (!live) {
+    app.innerHTML = `
+      <div class="narrow-page memes-page">
+        <div class="memes-coming">
+          <span class="memes-coming-badge">✦ Coming soon</span>
+          <h1 class="memes-coming-title">Memes</h1>
+        </div>
+      </div>`;
+    currentUpdate = null;
+    return;
+  }
+
+  app.innerHTML = `
+    <div class="narrow-page memes-page">
+      <div class="memes-hero">
+        <a class="btn btn-primary btn-big" href="#/memes/new">Create Meme Coin</a>
+      </div>
+
+      <input class="memes-search" id="memesSearch" type="search" placeholder="Search name, ticker, or contract address…" autocomplete="off" spellcheck="false">
+
+      <div class="memes-listbar">
+        <h2 class="memes-h2">Recent launches</h2>
+        <div class="memes-sort" id="memesSort">
+          <button data-sort="new">New</button>
+          <button data-sort="mcap">Market cap</button>
+          <button data-sort="vol">Volume</button>
+          <button data-sort="holders">Holders</button>
+        </div>
+      </div>
+      <div id="memesList" class="memes-grid"><div class="empty muted">Loading…</div></div>
+      <div id="memesPager" class="memes-pager"></div>
+    </div>`;
+
+  // fit roughly one screen of cards (each ~96px tall)
+  memesState.pageSize = Math.max(5, Math.floor((window.innerHeight - 340) / 96));
+  memesState.page = 0;
+  memesState.search = "";
+
+  $("#memesSort").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-sort]");
+    if (!b) return;
+    memesState.sort = b.dataset.sort;
+    memesState.page = 0;
+    renderMemesList();
+  });
+
+  const searchEl = $("#memesSearch");
+  if (searchEl) searchEl.addEventListener("input", () => {
+    memesState.search = searchEl.value;
+    memesState.page = 0;
+    renderMemesList();
+  });
+
+  try {
+    const data = await api("/api/memes");
+    memesState.coins = (data && data.coins) || [];
+    memesState.ethUsd = (data && data.ethUsd) || null;
+    renderMemesList();
+  } catch (_) {
+    $("#memesList").innerHTML = '<div class="empty muted">No launches yet.</div>';
+  }
+  currentUpdate = null;
+}
+
+function memesSorted() {
+  const q = (memesState.search || "").trim().toLowerCase();
+  let coins = memesState.coins;
+  if (q) {
+    coins = coins.filter((c) =>
+      (c.name || "").toLowerCase().includes(q) ||
+      (c.symbol || "").toLowerCase().includes(q) ||
+      (c.token || "").toLowerCase().includes(q)
+    );
+  }
+  const bi = (x) => { try { return BigInt(x || "0"); } catch { return 0n; } };
+  const cmp = {
+    new: (a, b) => b.block - a.block,
+    mcap: (a, b) => (bi(b.mcapWei) > bi(a.mcapWei) ? 1 : bi(b.mcapWei) < bi(a.mcapWei) ? -1 : 0),
+    vol: (a, b) => (bi(b.volumeWei) > bi(a.volumeWei) ? 1 : bi(b.volumeWei) < bi(a.volumeWei) ? -1 : 0),
+    holders: (a, b) => (b.holders || 0) - (a.holders || 0),
+  }[memesState.sort] || ((a, b) => b.block - a.block);
+  return coins.slice().sort(cmp);
+}
+
+function renderMemesList() {
+  for (const b of document.querySelectorAll("#memesSort button")) b.classList.toggle("active", b.dataset.sort === memesState.sort);
+  const listEl = $("#memesList");
+  const pagerEl = $("#memesPager");
+  if (!listEl) return;
+  const all = memesSorted();
+  if (!all.length) {
+    const msg = memesState.search.trim() ? "No coins match your search." : "No launches yet — be the first.";
+    listEl.innerHTML = `<div class="empty muted">${msg}</div>`;
+    if (pagerEl) pagerEl.innerHTML = "";
+    return;
+  }
+  const pages = Math.max(1, Math.ceil(all.length / memesState.pageSize));
+  memesState.page = Math.min(memesState.page, pages - 1);
+  const start = memesState.page * memesState.pageSize;
+  listEl.innerHTML = all.slice(start, start + memesState.pageSize).map((c) => memeCardHtml(c)).join("");
+  wireMemeCards(listEl);
+  if (pagerEl) {
+    pagerEl.innerHTML = pages > 1
+      ? `<button id="pgPrev" ${memesState.page === 0 ? "disabled" : ""}>‹ Prev</button>` +
+        `<span class="memes-pageinfo">Page ${memesState.page + 1} / ${pages}</span>` +
+        `<button id="pgNext" ${memesState.page >= pages - 1 ? "disabled" : ""}>Next ›</button>`
+      : "";
+    const prev = $("#pgPrev"), next = $("#pgNext");
+    if (prev) prev.onclick = () => { if (memesState.page > 0) { memesState.page--; renderMemesList(); } };
+    if (next) next.onclick = () => { if (memesState.page < pages - 1) { memesState.page++; renderMemesList(); } };
+  }
+}
+
+// Format a wei value as compact USD (if an ETH price is known) or ETH.
+function fmtValue(wei, ethUsd) {
+  if (wei == null) return "—";
+  let eth;
+  try { eth = Number(BigInt(wei)) / 1e18; } catch { return "—"; }
+  return ethUsd ? "$" + fmtCompactNum(eth * ethUsd) : fmtCompactNum(eth) + " ETH";
+}
+function fmtCompactNum(n) {
+  if (!isFinite(n)) return "0";
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  if (n >= 1) return n.toFixed(2);
+  if (n === 0) return "0";
+  if (n >= 0.0001) return n.toFixed(4);
+  return n.toPrecision(2);
+}
+
+function memeAvatar(c) {
+  const a = (c.token || "0x0").toLowerCase();
+  const hue = parseInt(a.slice(2, 8) || "0", 16) % 360;
+  const hue2 = (hue + 45) % 360;
+  const ch = ((c.symbol || c.name || "?").trim()[0] || "?").toUpperCase();
+  const placeholder =
+    `<div class="meme-avatar" style="background:linear-gradient(135deg,hsl(${hue},62%,50%),hsl(${hue2},64%,38%))">${esc(ch)}</div>`;
+  if (c.imageUrl) {
+    // real IPFS avatar; if it fails to load, swap in the generated placeholder
+    return `<img class="meme-avatar" src="${esc(c.imageUrl)}" alt="" loading="lazy"` +
+      ` data-hue="${hue}" data-hue2="${hue2}" data-ch="${esc(ch)}" onerror="memeAvatarFallback(this)">`;
+  }
+  return placeholder;
+}
+function memeAvatarFallback(img) {
+  const div = document.createElement("div");
+  div.className = "meme-avatar";
+  div.style.background = `linear-gradient(135deg,hsl(${img.dataset.hue},62%,50%),hsl(${img.dataset.hue2},64%,38%))`;
+  div.textContent = img.dataset.ch || "?";
+  img.replaceWith(div);
+}
+function safeUrl(u) {
+  return typeof u === "string" && /^https?:\/\//i.test(u.trim()) ? u.trim() : null;
+}
+function memeSocials(coin) {
+  if (!coin) return "";
+  const links = [["Twitter", coin.twitter], ["Website", coin.website], ["Telegram", coin.telegram]]
+    .map(([label, u]) => [label, safeUrl(u)])
+    .filter(([, u]) => u);
+  if (!links.length) return "";
+  return `<div class="meme-socials">` +
+    links.map(([label, u]) => `<a class="meme-social" href="${esc(u)}" target="_blank" rel="noopener">${label}</a>`).join("") +
+    `</div>`;
+}
+
+function memeCardHtml(c) {
+  const eu = memesState.ethUsd;
+  return `
+    <div class="meme-card" data-token="${esc(c.token)}">
+      ${memeAvatar(c)}
+      <div class="meme-card-main">
+        <div class="meme-card-title">${esc(c.name || "—")} <span class="meme-ticker">${esc(c.symbol || "")}</span></div>
+        <button class="meme-ca" type="button" data-ca="${esc(c.token)}" title="Copy contract address">${short(c.token)} <span class="meme-ca-ic">⧉</span></button>
+      </div>
+      <div class="meme-metrics">
+        <div class="meme-metric"><span class="mm-k">MC</span><span class="mm-v">${fmtValue(c.mcapWei, eu)}</span></div>
+        <div class="meme-metric"><span class="mm-k">Vol</span><span class="mm-v">${fmtValue(c.volumeWei, eu)}</span></div>
+        <div class="meme-metric"><span class="mm-k">Holders</span><span class="mm-v">${c.holders != null ? fmtInt(String(c.holders)) : "—"}</span></div>
+      </div>
+    </div>`;
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) {}
+  // Fallback for contexts where the async Clipboard API is blocked.
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+function wireMemeCards(root) {
+  for (const card of root.querySelectorAll(".meme-card")) {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(".meme-ca")) return; // the copy button handles its own click
+      location.hash = "#/memes/" + card.dataset.token;
+    });
+  }
+  for (const btn of root.querySelectorAll(".meme-ca")) {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const ok = await copyText(btn.dataset.ca);
+      toast(ok ? "Contract address copied" : "Copy failed", ok ? "ok" : "err", 2000);
+    });
+  }
+}
+
+async function pageMemesNew() {
+  if (!LAUNCHPAD) {
+    app.innerHTML = `<div class="narrow-page"><div class="card empty muted">Launchpad not deployed yet.</div></div>`;
+    return;
+  }
+  app.innerHTML = `
+    <div class="narrow-page">
+    <a class="back-link" href="#/memes">← Memes</a>
+    <h1 class="page-title centered">Create Meme Coin</h1>
+    <div class="card">
+      <form id="memeForm" class="form-grid" novalidate>
+        <div class="meme-form-top">
+          <label class="meme-drop">
+            <img id="imgPreview" class="meme-drop-img" alt="" style="display:none">
+            <span id="imgPick" class="meme-drop-hint"><span class="meme-drop-plus">+</span>Add image</span>
+            <input type="file" name="cimg" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+          </label>
+          <div class="meme-form-top-right">
+            <div class="field">
+              <label>Name</label>
+              <input name="cname" maxlength="32" placeholder="Doge Rob" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="field">
+              <label>Ticker</label>
+              <input class="mono" name="csymbol" maxlength="11" placeholder="DROB" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <label>Twitter <span class="muted">(optional)</span></label>
+          <input name="ctwitter" placeholder="https://x.com/…" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>Telegram <span class="muted">(optional)</span></label>
+          <input name="ctelegram" placeholder="https://t.me/…" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>Website <span class="muted">(optional)</span></label>
+          <input name="cwebsite" placeholder="https://…" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>Initial buy (ETH)</label>
+          <input class="mono" name="cdev" inputmode="decimal" placeholder="0.05" value="0.05">
+          <div class="sub">Seeds the locked liquidity and buys you the opening tokens. Must be &gt; 0.</div>
+        </div>
+        <button class="btn btn-primary btn-big" type="submit">Launch Coin</button>
+      </form>
+    </div>
+    </div>`;
+
+  // avatar preview + client-side validation (fills the square dropzone)
+  const fileInput = $('#memeForm [name="cimg"]');
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files[0];
+    const prev = $("#imgPreview");
+    const hint = $("#imgPick");
+    if (!file) { prev.style.display = "none"; hint.style.display = "flex"; return; }
+    if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) { toast("Use a PNG / JPG / WEBP / GIF image", "err"); fileInput.value = ""; return; }
+    if (file.size > 5 * 1024 * 1024) { toast("Image must be ≤ 5MB", "err"); fileInput.value = ""; return; }
+    prev.src = URL.createObjectURL(file);
+    prev.style.display = "block";
+    hint.style.display = "none";
+  });
+
+  $("#memeForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!account) return toast("Connect your wallet first", "err");
+    const f = e.target;
+    const name = f.elements.cname.value.trim();
+    const symbol = f.elements.csymbol.value.trim();
+    const devWei = parseEth(f.elements.cdev.value);
+    const file = f.elements.cimg.files[0];
+    const twitter = f.elements.ctwitter.value.trim();
+    const website = f.elements.cwebsite.value.trim();
+    const telegram = f.elements.ctelegram.value.trim();
+    if (name.length < 1 || name.length > 32) return toast("Name must be 1–32 characters", "err");
+    if (symbol.length < 1 || symbol.length > 11) return toast("Symbol must be 1–11 characters", "err");
+    if (!file) return toast("Add an avatar image", "err");
+    if (devWei === null || devWei <= 0n) return toast("First buy must be greater than 0", "err");
+
+    const btn = f.querySelector("button[type=submit]");
+    btn.disabled = true;
+    const label = btn.textContent;
+    let metadataURI;
+    try {
+      btn.textContent = "Uploading image…";
+      const img = await pinAvatar(file);
+      btn.textContent = "Saving metadata…";
+      const meta = { name, symbol, image: img.ipfs };
+      if (twitter) meta.twitter = twitter;
+      if (website) meta.website = website;
+      if (telegram) meta.telegram = telegram;
+      const md = await pinJson(meta);
+      metadataURI = md.ipfs;
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = label;
+      return toast("Upload failed: " + err.message, "err", 6000);
+    }
+    btn.textContent = label;
+    btn.disabled = false;
+
+    const hash = await sendTx(launchTx(name, symbol, metadataURI, devWei), btn);
+    if (hash) {
+      toast("Launch sent — your coin appears on Memes once confirmed", "ok", 10000);
+      setTimeout(() => { location.hash = "#/memes"; }, 3000);
+    }
+  });
+  currentUpdate = null;
+}
+
+async function pageMemesCoin(token) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(token)) { location.hash = "#/memes"; return; }
+  token = token.toLowerCase();
+  let coin = null, eu = null;
+  try {
+    const d = await api("/api/memes");
+    eu = (d && d.ethUsd) || null;
+    coin = (d.coins || []).find((c) => c.token.toLowerCase() === token);
+  } catch (_) {}
+
+  const sym = esc(coin?.symbol || "");
+  const stat = (k, v) => `<div class="coin-stat"><div class="cs-k">${k}</div><div class="cs-v">${v}</div></div>`;
+  const info = (k, v, wide) => `<div class="coin-info${wide ? " wide" : ""}"><div class="ci-k">${k}</div><div class="ci-v">${v}</div></div>`;
+
+  app.innerHTML = `
+    <div class="narrow-page coin-page">
+      <a class="back-link" href="#/memes">← Memes</a>
+
+      <div class="coin-hero">
+        ${coin ? memeAvatar(coin) : ""}
+        <div class="coin-hero-info">
+          <div class="coin-hero-title">${esc(coin?.name || "Coin")} <span class="ticker">${sym}</span></div>
+          <button class="meme-ca coin-ca" type="button" data-ca="${esc(token)}" title="Copy contract address">${short(token)} <span class="meme-ca-ic">⧉</span></button>
+          ${memeSocials(coin)}
+        </div>
+      </div>
+
+      <div class="coin-stats">
+        ${stat("Market cap", fmtValue(coin?.mcapWei, eu))}
+        ${stat("Volume", fmtValue(coin?.volumeWei || "0", eu))}
+        ${stat("Holders", coin && coin.holders != null ? fmtInt(String(coin.holders)) : "—")}
+        ${stat("Trades", coin ? fmtInt(String(coin.trades || 0)) : "—")}
+      </div>
+
+      <div class="card coin-info-card">
+        <div class="coin-info-grid">
+          ${info("Trading pair", (sym || "TOKEN") + " / WETH")}
+          ${info("Supply", "1,000,000,000")}
+          ${info("Trade tax", "1%")}
+          ${info("Pool fee", "0%")}
+          ${coin ? info("Creator", addrLink(coin.creator)) : ""}
+          ${coin?.ts ? info("Launched", memeTimeAgo(coin.ts)) : ""}
+          ${info("Contract", addrLink(token))}
+          ${info("Explorer", `<a class="addr-link" href="${EXPLORER}/token/${esc(token)}" target="_blank" rel="noopener">View ↗</a>`)}
+        </div>
+      </div>
+
+      <div class="card" id="feeCard"><div class="empty muted">Loading fees…</div></div>
+    </div>`;
+
+  const ca = $(".coin-ca");
+  if (ca) ca.addEventListener("click", async () => {
+    const ok = await copyText(ca.dataset.ca);
+    toast(ok ? "Contract address copied" : "Copy failed", ok ? "ok" : "err", 2000);
+  });
+
+  await renderMemeFees(token);
+  currentUpdate = null;
+}
+
+function memeTimeAgo(ts) {
+  if (!ts) return "—";
+  const s = Math.floor(Date.now() / 1000) - ts;
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+async function renderMemeFees(token) {
+  const el = $("#feeCard");
+  if (!el) return;
+  try {
+    const [creatorHex, treasuryHex, pcHex, ptHex] = await Promise.all([
+      readCall(token, SEL_CREATOR), readCall(token, SEL_TREASURY),
+      readCall(token, SEL_PENDING_CREATOR), readCall(token, SEL_PENDING_TREASURY),
+    ]);
+    // Empty result = no contract on the wallet's current network (e.g. wallet on the
+    // wrong chain, or viewing a testnet coin while the fallback RPC is mainnet).
+    if (!creatorHex || creatorHex.length < 66) {
+      el.innerHTML = `<h2 class="memes-h2">Fees (WETH)</h2>` +
+        `<p class="sub muted">Connect the creator or treasury wallet to withdraw fees.</p>`;
+      return;
+    }
+    const creator = ("0x" + creatorHex.slice(26)).toLowerCase();
+    const treasury = ("0x" + treasuryHex.slice(26)).toLowerCase();
+    const pc = readBig(pcHex), pt = readBig(ptHex);
+    const me = account ? account.toLowerCase() : null;
+
+    let html = `
+      <h2 class="memes-h2">Fees (WETH)</h2>
+      <div class="kv"><div class="k">Creator claimable</div><div class="v mono">${fmtEth(pc)} <span class="muted">→ ${addrLink(creator)}</span></div></div>
+      <div class="kv"><div class="k">Treasury claimable</div><div class="v mono">${fmtEth(pt)} <span class="muted">→ ${addrLink(treasury)}</span></div></div>`;
+    const acts = [];
+    if (me && me === creator && pc > 0n) acts.push(`<button class="btn btn-primary" id="wcBtn">Withdraw my creator fees</button>`);
+    if (me && me === treasury && pt > 0n) acts.push(`<button class="btn btn-primary" id="wtBtn">Withdraw treasury fees</button>`);
+    html += acts.length
+      ? `<div class="meme-actions">${acts.join("")}</div>`
+      : `<div class="sub muted">${me ? "Connected wallet has nothing to withdraw here." : "Connect the creator or treasury wallet to withdraw."}</div>`;
+    el.innerHTML = html;
+
+    const wc = $("#wcBtn");
+    if (wc) wc.addEventListener("click", async () => {
+      const h = await sendTx(withdrawCreatorTx(token, account), wc);
+      if (h) { toast("Withdraw sent", "ok"); setTimeout(() => renderMemeFees(token), 4000); }
+    });
+    const wt = $("#wtBtn");
+    if (wt) wt.addEventListener("click", async () => {
+      const h = await sendTx(withdrawTreasuryTx(token, account), wt);
+      if (h) { toast("Withdraw sent", "ok"); setTimeout(() => renderMemeFees(token), 4000); }
+    });
+  } catch (e) {
+    el.innerHTML = `<div class="empty muted">Couldn't load fees: ${esc(e.message)}</div>`;
+  }
+}
+
 function setNav(route) {
   for (const a of document.querySelectorAll("#nav a")) {
     a.classList.toggle("active", a.dataset.route === route);
@@ -1523,6 +2058,9 @@ async function router() {
     else if (parts[0] === "deploy") { setNav("deploy"); await pageDeploy(); }
     else if (parts[0] === "market") { setNav("market"); await pageMarket(parts[1] ? decodeURIComponent(parts[1]) : null); }
     else if (parts[0] === "me") { setNav("me"); await pageMe(); }
+    else if (parts[0] === "memes" && parts[1] === "new") { setNav("memes"); await pageMemesNew(); }
+    else if (parts[0] === "memes" && parts[1]) { setNav("memes"); await pageMemesCoin(decodeURIComponent(parts[1])); }
+    else if (parts[0] === "memes") { setNav("memes"); await pageMemes(); }
     else { location.hash = "#/"; }
   } catch (e) {
     app.innerHTML = `<div class="card error-card">Failed to load page: ${esc(e.message)}<br><span class="small muted">Make sure the indexer is running locally</span></div>`;

@@ -11,6 +11,25 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+const execFileP = promisify(execFile);
+
+// The mainnet Blockscout host fingerprints/blocks Node's TLS ClientHello (both undici
+// and node:https get RST / connect-timeout), while system curl passes. Route explorer
+// reads through curl so holders/price metrics work on mainnet. Falls back to fetch if
+// curl is unavailable. RPC/IPFS stay on fetch (those hosts don't block Node).
+async function explorerJson(url, timeoutSec = 8) {
+  try {
+    const { stdout } = await execFileP("curl", ["-sS", "--max-time", String(timeoutSec), url], {
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    return JSON.parse(stdout);
+  } catch {
+    const r = await fetch(url, { signal: AbortSignal.timeout(timeoutSec * 1000) });
+    return r.json();
+  }
+}
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = process.env.CONFIG_PATH || path.join(DIR, "config.json");
@@ -19,8 +38,58 @@ const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
 const RPC_URL = process.env.RPC_URL || cfg.rpcUrl;
 const HUB = cfg.hubAddress.toLowerCase();
 const MARKET = cfg.marketAddress.toLowerCase();
+const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+// Memes launchpad factory (optional). When set, TokenLaunched events are indexed
+// into state.coins and served at /api/memes; the address is exposed via /api/status.
+const LAUNCHPAD = (cfg.launchpadAddress || ZERO_ADDR).toLowerCase();
+// Token addresses to hide from /api/memes (e.g. internal test launches). The
+// deploy-time verification seed is a standalone TaxedToken with no TokenLaunched
+// event, so it never needs listing here.
+const EXCLUDED_TOKENS = new Set((cfg.excludedTokens || []).map((a) => String(a).toLowerCase()));
+// Shared V4TaxHook — its V4TaxCollected events give per-coin trade volume.
+const HOOK = (cfg.hookAddress || ZERO_ADDR).toLowerCase();
+// v4 pool price for live market-cap: read Slot0 straight from the PoolManager via
+// extsload (StateView is just a wrapper and isn't reliably deployed here). WETH for
+// the price side; explorer API for holder counts.
+const POOL_MANAGER = (cfg.poolManager || ZERO_ADDR).toLowerCase();
+const STATE_VIEW = (cfg.stateView || ZERO_ADDR).toLowerCase(); // legacy fallback
+const WETH_ADDR = (cfg.weth || ZERO_ADDR).toLowerCase();
+const EXPLORER_API = (cfg.explorerApi || "").replace(/\/$/, "");
+// Addresses the single eth_getLogs sweep watches (zero/unset ones are dropped).
+const SCAN_ADDRESSES = [HUB, MARKET, LAUNCHPAD, HOOK].filter((a) => a && a !== ZERO_ADDR);
+// Inscriptions live in tx calldata (not logs), so they need every block fetched.
+// Launchpad-only deployments (Hub+Market unset) can fast-path off eth_getLogs alone.
+const INSCRIPTION_MODE = HUB !== ZERO_ADDR || MARKET !== ZERO_ADDR;
 const STATE_PATH = path.resolve(DIR, cfg.stateFile || "state.json");
 const EVENTS_PATH = path.resolve(DIR, cfg.eventsFile || "events.jsonl");
+// Memes coin avatars are pinned to IPFS; the ipfs:// URI lives on-chain in the
+// TokenLaunched event. The server can pin uploads via Pinata (PINATA_JWT) at
+// /api/memes/pin, and rewrites ipfs:// to an HTTP gateway for the frontend.
+const PINATA_JWT = process.env.PINATA_JWT || cfg.pinataJwt || "";
+// Gateway used to build the http URL the FRONTEND <img> loads (our pins live on Pinata's gateway).
+const IPFS_GATEWAY = (cfg.ipfsGateway || "https://gateway.pinata.cloud/ipfs/").replace(/\/?$/, "/");
+// Gateways the SERVER tries (in order) when fetching metadata JSON — ipfs.io alone is too slow/flaky.
+const IPFS_FETCH_GATEWAYS = (cfg.ipfsFetchGateways || [
+  "https://gateway.pinata.cloud/ipfs/",
+  "https://dweb.link/ipfs/",
+  "https://ipfs.io/ipfs/",
+]).map((g) => g.replace(/\/?$/, "/"));
+const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
+const ipfsToHttp = (uri) =>
+  typeof uri === "string" && uri.startsWith("ipfs://") ? IPFS_GATEWAY + uri.slice(7) : uri || null;
+
+// Fetch an ipfs:// (or http) resource, trying each gateway until one responds.
+async function fetchIpfs(uri, timeoutMs = 12000) {
+  const cid = typeof uri === "string" && uri.startsWith("ipfs://") ? uri.slice(7) : null;
+  const urls = cid ? IPFS_FETCH_GATEWAYS.map((g) => g + cid) : [uri];
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      if (r.ok) return r;
+    } catch {}
+  }
+  return null;
+}
 const CONFIRMATIONS = cfg.confirmations ?? 10;
 const BATCH_BLOCKS = cfg.batchBlocks ?? 50;
 const POLL_MS = cfg.pollMs ?? 3000;
@@ -41,6 +110,10 @@ const T = {
   BidPlaced: "0xfaaf78085e2c2d821322f054efd5ee566d92fe1cbae9123a42ec9abf5169f998", // BidPlaced(uint256,address,bytes32,string,uint256,uint256)
   BidFilled: "0xccaaec2a776da8d0eeb5f11e4d2be4d028082e9b5077028a178f921e92480abf", // BidFilled(uint256,address)
   BidCancelled: "0xc1546e394b1975212fe013e7e6995653585f44e568c407d1157483f7d4b94581", // BidCancelled(uint256)
+  // TokenLaunched(address creator, address token, address baseAsset, address treasury, bytes32 poolId, uint24 fee, int24 tickSpacing, uint160 sqrtPriceX96, uint256 openingVirtualMarketCap, string imageURI)
+  TokenLaunched: "0x4adf842742a001089c1b1320a9ae19e68569c50d433251fb61bf5bd37f6817d0",
+  // V4TaxCollected(bytes32 poolId, address token, address sender, bool isBuy, uint256 grossAmount, uint256 taxAmount)
+  V4TaxCollected: "0x5227059ceacf82773e91b09376ff0299d82a787e48b2b02403a727a797d89db9",
 };
 
 // ---- state ----
@@ -63,6 +136,9 @@ function freshState() {
     recentTrades: [], // [{id, tick, amt, price, seller, buyer, tx, block}] most-recent-first
     recentActivity: [], // unified feed: [{type, tick, ..., block, tx}] most-recent-first
     invalidTransfers: 0,
+    // Memes launchpad: coins[tokenAddr] = {token, creator, name, symbol, treasury, poolId, image, tx, block, ts}
+    coins: {},
+    coinOrder: [], // token addresses, launch order (most-recent-first when served)
   };
 }
 
@@ -152,6 +228,21 @@ function decodeUtf8(inputHex) {
   if (!inputHex || inputHex === "0x") return "";
   return Buffer.from(inputHex.slice(2), "hex").toString("utf8");
 }
+
+// ---- Memes coin avatars ----
+// Detect a supported image by magic bytes (never trust a client-supplied mime).
+function detectImage(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "png";
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "jpg";
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return "gif";
+  if (
+    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+  ) return "webp";
+  return null;
+}
+const IMG_MIME = { png: "image/png", jpg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
 
 function bal(tick, addr) {
   return BigInt(state.balances[tick]?.[addr] || "0");
@@ -323,6 +414,39 @@ function applyLog(log, txHash, blockNum, blockTs) {
     }
     logEvent({ op: "bid-" + b.chainStatus, id, tx: txHash, block: blockNum });
   }
+
+  // ---- Memes launchpad: a new coin was fair-launched ----
+  if (addr === LAUNCHPAD && topic0 === T.TokenLaunched) {
+    const token = topicAddr(log.topics[2]);
+    if (state.coins[token]) return; // idempotent
+    const creator = topicAddr(log.topics[1]);
+    const treasury = "0x" + word(log.data, 1).slice(24); // data word 1 = treasury
+    const poolId = "0x" + word(log.data, 2); // data word 2 = poolId (bytes32)
+    // data word 7 = offset to the on-chain URI string (points to a metadata JSON, or a bare image for older launches)
+    let metadataURI = "";
+    try { metadataURI = decodeAbiString(log.data, 7); } catch {}
+    state.coins[token] = {
+      token, creator, treasury, poolId, metadataURI,
+      image: null, twitter: null, website: null, telegram: null, metaResolved: false,
+      name: null, symbol: null, // enriched via eth_call / IPFS after the scan batch
+      volumeWei: "0", trades: 0, // accumulated from V4TaxCollected
+      mcapWei: null, holders: null, metricsAt: 0, // refreshed periodically
+      tx: txHash, block: blockNum, ts: blockTs,
+    };
+    state.coinOrder.push(token);
+    pushActivity({ type: "launch", token, creator, tx: txHash, block: blockNum });
+    logEvent({ op: "launch", token, creator, tx: txHash, block: blockNum });
+  }
+
+  // ---- Memes launchpad: a taxed swap → accumulate trade volume ----
+  if (addr === HOOK && topic0 === T.V4TaxCollected) {
+    const token = topicAddr(log.topics[2]); // indexed token
+    const coin = state.coins[token];
+    if (!coin) return; // volume only tracked for coins we know
+    const grossAmount = BigInt("0x" + word(log.data, 1)); // data word 1 = grossAmount (WETH)
+    coin.volumeWei = (BigInt(coin.volumeWei || "0") + grossAmount).toString();
+    coin.trades = (coin.trades || 0) + 1;
+  }
 }
 
 function fatal(msg) {
@@ -401,7 +525,7 @@ async function scanToTarget() {
     // call path (direct tx, Safe/factory internal call, contract wrapper) —
     // logs only exist for successful txs, so no receipt checks are needed.
     const logs = await rpc("eth_getLogs", [
-      { fromBlock: "0x" + from.toString(16), toBlock: "0x" + to.toString(16), address: [HUB, MARKET] },
+      { fromBlock: "0x" + from.toString(16), toBlock: "0x" + to.toString(16), address: SCAN_ADDRESSES },
     ]);
     const logsByBlockTx = new Map(); // blockNum -> txIndex -> [logs in logIndex order]
     for (const lg of logs) {
@@ -416,41 +540,64 @@ async function scanToTarget() {
       for (const arr of byTx.values()) arr.sort((x, y) => hexToNum(x.logIndex) - hexToNum(y.logIndex));
     }
 
-    // Fetch blocks CONCURRENTLY (network I/O is the bottleneck), in windows of
-    // `blockConcurrency` to bound memory, then APPLY strictly in order so the
-    // ledger stays deterministic. This lets the indexer keep up with fast chains.
     const CONC = cfg.blockConcurrency ?? 20;
-    for (let base = from; base <= to; base += CONC) {
-      const end = Math.min(base + CONC - 1, to);
-      const cnt = end - base + 1;
-      const blks = await Promise.all(
-        Array.from({ length: cnt }, (_, k) => rpc("eth_getBlockByNumber", ["0x" + (base + k).toString(16), true]))
-      );
-      for (let k = 0; k < cnt; k++) {
-        const b = base + k;
-        const block = blks[k];
-        if (!block) throw new Error(`block ${b} not available`);
-        if (state.lastBlockHash && block.parentHash.toLowerCase() !== state.lastBlockHash) {
-          fatal(
-            `reorg detected at block ${b} (parentHash mismatch). ` +
-              `Delete state.json and events.jsonl, then restart to replay from genesis (deterministic).`
-          );
+    if (!INSCRIPTION_MODE) {
+      // Launchpad-only fast path: skip empty blocks entirely. Only blocks with logs
+      // matter; fetch just their timestamps and apply logs in order. (No hash-chain
+      // reorg check here — enable inscription mode for that.)
+      const blocksWithLogs = [...logsByBlockTx.keys()].sort((a, b) => a - b);
+      const tsByBlock = new Map();
+      for (let i = 0; i < blocksWithLogs.length; i += CONC) {
+        const chunk = blocksWithLogs.slice(i, i + CONC);
+        const blks = await Promise.all(
+          chunk.map((bn) => rpc("eth_getBlockByNumber", ["0x" + bn.toString(16), false]))
+        );
+        chunk.forEach((bn, k) => { if (blks[k]) tsByBlock.set(bn, hexToNum(blks[k].timestamp)); });
+      }
+      for (const bn of blocksWithLogs) {
+        const byTx = logsByBlockTx.get(bn);
+        const blockTs = tsByBlock.get(bn) ?? 0;
+        for (const ti of [...byTx.keys()].sort((a, b) => a - b)) {
+          for (const lg of byTx.get(ti)) applyLog(lg, lg.transactionHash, bn, blockTs);
         }
-        const byTx = logsByBlockTx.get(b);
-        const blockTs = hexToNum(block.timestamp); // unix seconds, for trade time-ranges
-        for (const tx of block.transactions) {
-          const txLogs = byTx?.get(hexToNum(tx.transactionIndex));
-          if (txLogs) for (const lg of txLogs) applyLog(lg, tx.hash, b, blockTs);
-          // a tx can also be a top-level transfer inscription (mutually exclusive
-          // with system-contract logs in practice; both applied deterministically)
-          await applyTransfer(tx, b, Boolean(txLogs));
+      }
+      state.lastBlock = to;
+    } else {
+      // Inscription mode: fetch every block (transfer/accept inscriptions live in
+      // tx calldata, not logs) CONCURRENTLY, then APPLY strictly in order so the
+      // ledger stays deterministic. Also chains block hashes for reorg detection.
+      for (let base = from; base <= to; base += CONC) {
+        const end = Math.min(base + CONC - 1, to);
+        const cnt = end - base + 1;
+        const blks = await Promise.all(
+          Array.from({ length: cnt }, (_, k) => rpc("eth_getBlockByNumber", ["0x" + (base + k).toString(16), true]))
+        );
+        for (let k = 0; k < cnt; k++) {
+          const b = base + k;
+          const block = blks[k];
+          if (!block) throw new Error(`block ${b} not available`);
+          if (state.lastBlockHash && block.parentHash.toLowerCase() !== state.lastBlockHash) {
+            fatal(
+              `reorg detected at block ${b} (parentHash mismatch). ` +
+                `Delete state.json and events.jsonl, then restart to replay from genesis (deterministic).`
+            );
+          }
+          const byTx = logsByBlockTx.get(b);
+          const blockTs = hexToNum(block.timestamp); // unix seconds, for trade time-ranges
+          for (const tx of block.transactions) {
+            const txLogs = byTx?.get(hexToNum(tx.transactionIndex));
+            if (txLogs) for (const lg of txLogs) applyLog(lg, tx.hash, b, blockTs);
+            // a tx can also be a top-level transfer inscription (mutually exclusive
+            // with system-contract logs in practice; both applied deterministically)
+            await applyTransfer(tx, b, Boolean(txLogs));
+          }
+          state.lastBlock = b;
+          state.lastBlockHash = block.hash.toLowerCase();
         }
-        state.lastBlock = b;
-        state.lastBlockHash = block.hash.toLowerCase();
       }
     }
     saveState();
-    console.log(`scanned to ${state.lastBlock}/${target} — ticks ${Object.keys(state.ticks).length}`);
+    console.log(`scanned to ${state.lastBlock}/${target} — coins ${Object.keys(state.coins).length}`);
     sseBroadcast(state.lastBlock);
   }
 }
@@ -554,6 +701,70 @@ function marketBook(tick) {
 const TICK_RE = /^[a-z0-9]{1,8}$/;
 const ADDR_RE = /^0x[0-9a-f]{40}$/;
 
+// Pin a base64 image (validated by magic bytes) to IPFS via Pinata, return its ipfs:// URI.
+function pinAvatar(req, res, json) {
+  if (!PINATA_JWT) return json(503, { error: "image pinning not configured (set PINATA_JWT)" });
+  let size = 0;
+  const chunks = [];
+  req.on("data", (c) => {
+    size += c.length;
+    if (size > MAX_AVATAR_BYTES * 2) req.destroy(); // base64 is ~1.33x the raw bytes
+    else chunks.push(c);
+  });
+  req.on("end", async () => {
+    try {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      const buf = Buffer.from(String(body.dataB64 || ""), "base64");
+      const ext = detectImage(buf);
+      if (!ext) return json(400, { error: "unsupported image (png/jpg/gif/webp only)" });
+      if (buf.length > MAX_AVATAR_BYTES) return json(400, { error: "image too large (max 5MB)" });
+      const form = new FormData();
+      form.append("file", new Blob([buf], { type: IMG_MIME[ext] }), "avatar." + ext);
+      const r = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
+        method: "POST",
+        headers: { authorization: "Bearer " + PINATA_JWT },
+        body: form,
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.IpfsHash) return json(502, { error: "pin failed" });
+      json(200, { cid: j.IpfsHash, ipfs: "ipfs://" + j.IpfsHash, url: IPFS_GATEWAY + j.IpfsHash });
+    } catch (e) {
+      json(400, { error: "bad pin request" });
+    }
+  });
+  req.on("error", () => { try { json(400, { error: "upload error" }); } catch {} });
+}
+
+// Pin a small metadata JSON object to IPFS via Pinata.
+function pinMetadataJson(req, res, json) {
+  if (!PINATA_JWT) return json(503, { error: "pinning not configured (set PINATA_JWT)" });
+  let size = 0;
+  const chunks = [];
+  req.on("data", (c) => {
+    size += c.length;
+    if (size > 64 * 1024) req.destroy();
+    else chunks.push(c);
+  });
+  req.on("end", async () => {
+    try {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      const obj = body.json;
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) return json(400, { error: "missing json object" });
+      const r = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", {
+        method: "POST",
+        headers: { authorization: "Bearer " + PINATA_JWT, "content-type": "application/json" },
+        body: JSON.stringify({ pinataContent: obj }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.IpfsHash) return json(502, { error: "pin failed" });
+      json(200, { cid: j.IpfsHash, ipfs: "ipfs://" + j.IpfsHash, url: IPFS_GATEWAY + j.IpfsHash });
+    } catch (e) {
+      json(400, { error: "bad json pin" });
+    }
+  });
+  req.on("error", () => { try { json(400, { error: "upload error" }); } catch {} });
+}
+
 function startServer() {
   const pub = path.join(DIR, "public");
   // Never let a request kill the process — the scanner lives here too.
@@ -577,11 +788,39 @@ function startServer() {
     };
     const p = url.pathname;
 
+    // ---- Memes avatar: pin an uploaded image to IPFS, return its ipfs:// URI ----
+    if (req.method === "POST" && p === "/api/memes/pin") {
+      return pinAvatar(req, res, json);
+    }
+    // ---- Memes metadata: pin a coin's metadata JSON (image + socials) to IPFS ----
+    if (req.method === "POST" && p === "/api/memes/pin-json") {
+      return pinMetadataJson(req, res, json);
+    }
+
     if (p === "/api/status") {
       json(200, {
-        hub: HUB, market: MARKET, lastBlock: state.lastBlock,
+        hub: HUB, market: MARKET,
+        launchpad: LAUNCHPAD === ZERO_ADDR ? null : LAUNCHPAD,
+        lastBlock: state.lastBlock,
         tickCount: Object.keys(state.ticks).length, recentMints: state.recentMints.slice(0, 30),
+        coinCount: Object.keys(state.coins).filter((t) => !EXCLUDED_TOKENS.has(t)).length,
       });
+    } else if (p === "/api/memes") {
+      // Fair-launched coins, most-recent first.
+      const coins = state.coinOrder
+        .slice().reverse()
+        .map((t) => state.coins[t])
+        .filter(Boolean)
+        .filter((c) => !EXCLUDED_TOKENS.has(c.token))
+        .map((c) => ({
+          token: c.token, name: c.name, symbol: c.symbol, creator: c.creator,
+          treasury: c.treasury, poolId: c.poolId, tx: c.tx, block: c.block, ts: c.ts,
+          image: c.image || null, // ipfs:// image URI (resolved from the on-chain metadata)
+          imageUrl: ipfsToHttp(c.image), // gateway URL for direct <img> use
+          twitter: c.twitter || null, website: c.website || null, telegram: c.telegram || null,
+          mcapWei: c.mcapWei || null, volumeWei: c.volumeWei || "0", holders: c.holders ?? null, trades: c.trades || 0,
+        }));
+      json(200, { launchpad: LAUNCHPAD === ZERO_ADDR ? null : LAUNCHPAD, ethUsd, coins });
     } else if (p === "/api/ticks") {
       const mkt = perTickMarket();
       json(200, { ticks: Object.keys(state.ticks).map((t) => tickSummary(t, mkt)).sort((a, b) => b.deployBlock - a.deployBlock) });
@@ -677,10 +916,242 @@ function startServer() {
   server.listen(cfg.port || 3000, () => console.log(`rob-20 platform on http://localhost:${cfg.port || 3000}`));
 }
 
+// ---- Memes: fill in name/symbol for freshly-launched coins (one eth_call each) ----
+const NAME_SEL = "0x06fdde03";
+const SYMBOL_SEL = "0x95d89b41";
+async function ethCallString(to, selector) {
+  const ret = await rpc("eth_call", [{ to, data: selector }, "latest"]);
+  if (!ret || ret === "0x") return "";
+  try {
+    return decodeAbiString(ret, 0);
+  } catch {
+    return "";
+  }
+}
+// Resolve a coin's on-chain URI: fetch the metadata JSON from IPFS for image + socials.
+// Falls back to treating the URI as a bare image (older launches / non-JSON payloads).
+async function resolveMetadata(c) {
+  if (c.metaResolved) return false;
+  if (!c.metadataURI) { c.metaResolved = true; return true; }
+  const r = await fetchIpfs(c.metadataURI);
+  if (!r) return false; // all gateways slow/down — retry on the next scan
+  const ct = (r.headers.get("content-type") || "").toLowerCase();
+  if (ct.startsWith("image/")) {
+    c.image = c.metadataURI;
+  } else {
+    let parsed = false;
+    try {
+      const j = JSON.parse(await r.text());
+      c.image = typeof j.image === "string" ? j.image : c.metadataURI;
+      if (typeof j.twitter === "string") c.twitter = j.twitter;
+      if (typeof j.website === "string") c.website = j.website;
+      if (typeof j.telegram === "string") c.telegram = j.telegram;
+      parsed = true;
+    } catch {}
+    if (!parsed) c.image = c.metadataURI; // not JSON — treat the URI itself as the image
+  }
+  c.metaResolved = true;
+  return true;
+}
+
+async function enrichCoins() {
+  let changed = false;
+  for (const token of Object.keys(state.coins)) {
+    const c = state.coins[token];
+    if (c.name === null || c.symbol === null) {
+      try {
+        c.name = await ethCallString(token, NAME_SEL);
+        c.symbol = await ethCallString(token, SYMBOL_SEL);
+        changed = true;
+      } catch (err) {
+        console.error(`coin meta fetch failed for ${token}: ${err.message}`);
+      }
+    }
+    if (await resolveMetadata(c)) changed = true;
+  }
+  if (changed) saveState();
+}
+
+// ---- Memes metrics: live market cap (v4 pool price via PoolManager.extsload) + holders ----
+const SEL_GET_SLOT0 = "0xc815641c"; // getSlot0(bytes32) — StateView (legacy fallback)
+const SEL_EXTSLOAD = "0x1e2eaeaf"; // extsload(bytes32) — PoolManager singleton storage read
+const POOLS_SLOT = 6n; // storage slot of PoolManager._pools mapping (v4 StateLibrary)
+const MASK160 = (1n << 160n) - 1n;
+const Q192 = 1n << 192n;
+const TOTAL_SUPPLY_WEI = 1_000_000_000n * (10n ** 18n); // fixed 1e27
+
+// keccak256(bytes: Uint8Array) -> 0x-hex (Ethereum padding). Used to derive a pool's
+// Slot0 storage slot: keccak256(abi.encodePacked(poolId, POOLS_SLOT)).
+const KECCAK_RC = [
+  0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an, 0x8000000080008000n,
+  0x000000000000808bn, 0x0000000080000001n, 0x8000000080008081n, 0x8000000000008009n,
+  0x000000000000008an, 0x0000000000000088n, 0x0000000080008009n, 0x000000008000000an,
+  0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n, 0x8000000000008003n,
+  0x8000000000008002n, 0x8000000000000080n, 0x000000000000800an, 0x800000008000000an,
+  0x8000000080008081n, 0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n,
+];
+const KECCAK_ROT = [
+  [0n, 36n, 3n, 41n, 18n], [1n, 44n, 10n, 45n, 2n], [62n, 6n, 43n, 15n, 61n],
+  [28n, 55n, 25n, 21n, 56n], [27n, 20n, 39n, 8n, 14n],
+];
+const KMASK = (1n << 64n) - 1n;
+const krotl = (x, n) => ((x << n) | (x >> (64n - n))) & KMASK;
+function keccak256(bytes) {
+  const A = [[0n,0n,0n,0n,0n],[0n,0n,0n,0n,0n],[0n,0n,0n,0n,0n],[0n,0n,0n,0n,0n],[0n,0n,0n,0n,0n]];
+  const rate = 136;
+  const buf = new Uint8Array(bytes.length + (rate - (bytes.length % rate)));
+  buf.set(bytes);
+  buf[bytes.length] ^= 0x01;
+  buf[buf.length - 1] ^= 0x80;
+  for (let off = 0; off < buf.length; off += rate) {
+    for (let i = 0; i < rate / 8; i++) {
+      let lane = 0n;
+      for (let j = 0; j < 8; j++) lane |= BigInt(buf[off + i * 8 + j]) << BigInt(8 * j);
+      A[i % 5][(i / 5) | 0] ^= lane;
+    }
+    for (let r = 0; r < 24; r++) {
+      const C = [0n,0n,0n,0n,0n];
+      for (let x = 0; x < 5; x++) C[x] = A[x][0] ^ A[x][1] ^ A[x][2] ^ A[x][3] ^ A[x][4];
+      const D = [0n,0n,0n,0n,0n];
+      for (let x = 0; x < 5; x++) D[x] = C[(x + 4) % 5] ^ krotl(C[(x + 1) % 5], 1n);
+      for (let x = 0; x < 5; x++) for (let y = 0; y < 5; y++) A[x][y] ^= D[x];
+      const B = [[0n,0n,0n,0n,0n],[0n,0n,0n,0n,0n],[0n,0n,0n,0n,0n],[0n,0n,0n,0n,0n],[0n,0n,0n,0n,0n]];
+      for (let x = 0; x < 5; x++) for (let y = 0; y < 5; y++) B[y][(2 * x + 3 * y) % 5] = krotl(A[x][y], KECCAK_ROT[x][y]);
+      for (let x = 0; x < 5; x++) for (let y = 0; y < 5; y++) A[x][y] = B[x][y] ^ ((B[(x + 1) % 5][y] ^ KMASK) & B[(x + 2) % 5][y]);
+      A[0][0] ^= KECCAK_RC[r];
+    }
+  }
+  let out = "0x";
+  let p = 0;
+  for (let i = 0; i < rate / 8 && p < 32; i++) {
+    const lane = A[i % 5][(i / 5) | 0];
+    for (let j = 0; j < 8 && p < 32; j++, p++) out += Number((lane >> BigInt(8 * j)) & 0xffn).toString(16).padStart(2, "0");
+  }
+  return out;
+}
+const bytes32ToU8 = (hex) => { const h = hex.replace(/^0x/, "").padStart(64, "0"); const u = new Uint8Array(32); for (let i = 0; i < 32; i++) u[i] = parseInt(h.substr(i * 2, 2), 16); return u; };
+// v4 StateLibrary: a pool's state lives at keccak256(abi.encodePacked(poolId, uint256(POOLS_SLOT))); Slot0 is the first word.
+function poolSlot0StorageSlot(poolId) {
+  const packed = new Uint8Array(64);
+  packed.set(bytes32ToU8(poolId), 0);
+  packed.set(bytes32ToU8("0x" + POOLS_SLOT.toString(16)), 32);
+  return keccak256(packed);
+}
+let ethUsd = null; // cached ETH/USD (null on chains without a price feed, e.g. testnet)
+let ethUsdAt = 0;
+
+async function refreshEthPrice() {
+  if (!EXPLORER_API || Date.now() - ethUsdAt < 300_000) return;
+  ethUsdAt = Date.now();
+  try {
+    const p = parseFloat((await explorerJson(EXPLORER_API + "/api/v2/stats")).coin_price);
+    ethUsd = isFinite(p) && p > 0 ? p : null;
+  } catch {}
+}
+
+// Market cap in WETH wei = (current token price in WETH) × fixed supply, from the v4 pool.
+async function coinMcapWei(c) {
+  if (WETH_ADDR === ZERO_ADDR || !c.poolId) return null;
+  try {
+    let sqrtPriceX96;
+    if (POOL_MANAGER !== ZERO_ADDR) {
+      // Read Slot0 directly from the PoolManager singleton via extsload.
+      const slot = poolSlot0StorageSlot(c.poolId);
+      const ret = await rpc("eth_call", [{ to: POOL_MANAGER, data: SEL_EXTSLOAD + slot.slice(2) }, "latest"]);
+      if (!ret || ret === "0x") return null;
+      sqrtPriceX96 = BigInt(ret) & MASK160; // Slot0 packs sqrtPriceX96 in the low 160 bits
+    } else if (STATE_VIEW !== ZERO_ADDR) {
+      const ret = await rpc("eth_call", [{ to: STATE_VIEW, data: SEL_GET_SLOT0 + c.poolId.slice(2) }, "latest"]);
+      if (!ret || ret === "0x") return null;
+      sqrtPriceX96 = BigInt("0x" + ret.slice(2, 66));
+    } else {
+      return null;
+    }
+    if (sqrtPriceX96 === 0n) return null;
+    const tokenIsC0 = c.token.toLowerCase() < WETH_ADDR;
+    return tokenIsC0
+      ? (sqrtPriceX96 * sqrtPriceX96 * TOTAL_SUPPLY_WEI) / Q192
+      : (Q192 * TOTAL_SUPPLY_WEI) / (sqrtPriceX96 * sqrtPriceX96);
+  } catch {
+    return null;
+  }
+}
+
+async function coinHolders(c) {
+  if (!EXPLORER_API) return null;
+  try {
+    const j = await explorerJson(EXPLORER_API + "/api/v2/tokens/" + c.token + "/counters");
+    const h = parseInt(j.token_holders_count, 10);
+    return isFinite(h) ? h : null;
+  } catch {
+    return null;
+  }
+}
+
+async function refreshMetrics() {
+  await refreshEthPrice();
+  const now = Date.now();
+  let changed = false;
+  for (const token of Object.keys(state.coins)) {
+    const c = state.coins[token];
+    if (now - (c.metricsAt || 0) < 20_000) continue; // per-coin throttle
+    const mc = await coinMcapWei(c);
+    const h = await coinHolders(c);
+    if (mc !== null) c.mcapWei = mc.toString();
+    if (h !== null) c.holders = h;
+    c.metricsAt = now;
+    changed = true;
+  }
+  if (changed) saveState();
+}
+
+// One-time launchpad backfill: when the factory is first configured, the indexer's
+// checkpoint (state.lastBlock) is usually already past the factory deploy block, so
+// the forward sweep would never see the TokenLaunched events that already happened.
+// Scan [launchpadDeployBlock .. lastBlock] ONCE for launchpad logs and replay them
+// through applyLog (idempotent for coins), guarded by state.launchpadBackfilledTo so
+// a restart can't re-run it and double-count V4TaxCollected volume. After this, the
+// forward sweep owns everything above lastBlock.
+async function backfillLaunchpadOnce() {
+  if (LAUNCHPAD === ZERO_ADDR) return;
+  if (state.launchpadBackfilledTo !== undefined) return; // already backfilled once
+  const startBlock = cfg.launchpadDeployBlock ?? cfg.deployBlock ?? 0;
+  const upTo = state.lastBlock;
+  const addrs = [LAUNCHPAD, HOOK].filter((a) => a !== ZERO_ADDR);
+  const coinsBefore = Object.keys(state.coins).length;
+  for (let from = startBlock; from <= upTo; from += BATCH_BLOCKS) {
+    const to = Math.min(from + BATCH_BLOCKS - 1, upTo);
+    const logs = await rpc("eth_getLogs", [{
+      fromBlock: "0x" + from.toString(16), toBlock: "0x" + to.toString(16),
+      address: addrs, topics: [[T.TokenLaunched, T.V4TaxCollected]],
+    }]);
+    const byBlock = new Map();
+    for (const lg of logs) {
+      const b = hexToNum(lg.blockNumber);
+      if (!byBlock.has(b)) byBlock.set(b, []);
+      byBlock.get(b).push(lg);
+    }
+    for (const bn of [...byBlock.keys()].sort((a, b) => a - b)) {
+      const blk = await rpc("eth_getBlockByNumber", ["0x" + bn.toString(16), false]);
+      const blockTs = blk ? hexToNum(blk.timestamp) : 0;
+      const arr = byBlock.get(bn).sort((x, y) =>
+        hexToNum(x.transactionIndex) - hexToNum(y.transactionIndex) || hexToNum(x.logIndex) - hexToNum(y.logIndex));
+      for (const lg of arr) applyLog(lg, lg.transactionHash, bn, blockTs);
+    }
+  }
+  state.launchpadBackfilledTo = upTo;
+  saveState();
+  const added = Object.keys(state.coins).length - coinsBefore;
+  if (startBlock <= upTo) console.log(`launchpad backfill [${startBlock}..${upTo}] — ${added} coin(s) recovered`);
+}
+
 // ---- main ----
-console.log(`rob-20 indexer — hub ${HUB}, market ${MARKET}, rpc ${RPC_URL}, from block ${state.lastBlock + 1}`);
+console.log(`rob-20 indexer — hub ${HUB}, market ${MARKET}, launchpad ${LAUNCHPAD}, rpc ${RPC_URL}, from block ${state.lastBlock + 1}`);
+await backfillLaunchpadOnce();
 if (ONCE) {
   await scanToTarget();
+  await enrichCoins();
+  await refreshMetrics();
   saveState();
   console.log("done (--once)");
 } else {
@@ -688,6 +1159,8 @@ if (ONCE) {
   for (;;) {
     try {
       await scanToTarget();
+      await enrichCoins();
+      await refreshMetrics();
     } catch (err) {
       console.error("scan error:", err.message);
       // A block may have been half-applied in memory before the error —
